@@ -1,0 +1,29 @@
+# --- Core data handling ---
+pandas>=2.2
+openpyxl>=3.1
+
+# --- Config ---
+python-dotenv>=1.0
+pydantic>=2.6
+
+# --- Groq SDK (used directly for the agent's tool-calling loop, SQL
+# generation, and sentiment classification - OpenAI-compatible chat API) ---
+groq
+
+# --- Mistral SDK (embeddings only - Groq has no embeddings endpoint) ---
+mistralai
+
+# --- LlamaIndex (retrieval over employee free-text comments) ---
+llama-index-core
+llama-index-embeddings-mistralai
+
+# --- API layer ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# --- Testing (structured-data tools only; no API key required) ---
+pytest>=8.0
+
+# --- Retry/backoff for the embedding build step (this Mistral tier has a
+# fairly low embeddings rate limit; see app/indexing.py) ---
+tenacity>=9.0
