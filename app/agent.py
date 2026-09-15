@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -72,6 +73,9 @@ Tool selection guide:
 - Percentages, averages, rating distributions, trends over time -> run_analytics \
   (prefer this over query_database for "percentage X" and "average rating by Y" \
   questions - it is computed deterministically, not written as freeform SQL)
+- A simple average rating for one specific survey question (especially when the \
+    question text is quoted) -> query_database. Do not use run_analytics with \
+    group_by="Question"; Question is not an analytics group-by.
 - "What do employees say about X", concerns, opinions, complaints, themes -> \
   search_employee_comments, and then call analyze_sentiment on the retrieved \
   comments' texts before describing the overall sentiment/tone
@@ -88,8 +92,22 @@ instead of guessing.
 
 When you do have verified results, write a clear, concise natural-language \
 answer that cites the actual numbers/quotes returned by the tools. Do not \
-show raw JSON to the user. Keep answers focused and readable.
+show raw JSON to the user. Rating is an INTEGER on a 1-5 scale (1 worst, 5 \
+best), so report database averages on that scale. Only provide a 0-10 \
+equivalent when the user explicitly requests it, calculated as the verified \
+1-5 average multiplied by 2, and label it as a 0-10 equivalent. Keep answers \
+focused and readable.
 """
+
+_SPECIFIC_QUESTION_AVERAGE_RE = re.compile(
+    r"\b(?:average|mean)\s+rating\b.*\bfor\b.*(?:['\"].+['\"]|\bquestion\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_specific_question_average(user_message: str) -> bool:
+    """Identify averages for one survey question before LLM tool selection."""
+    return bool(_SPECIFIC_QUESTION_AVERAGE_RE.search(user_message))
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -207,7 +225,12 @@ TOOL_SCHEMAS: list[dict] = [
 
 
 def _call_query_database(args: dict) -> dict:
-    return query_database.query_database(question=args["question"]).as_dict()
+    result = query_database.query_database(question=args["question"]).as_dict()
+    result["rating_scale"] = {
+        "database": "Rating is INTEGER on a 1-5 scale (1 worst, 5 best)",
+        "zero_to_ten_equivalent": "multiply a verified average by 2 only when explicitly requested",
+    }
+    return result
 
 
 def _call_run_analytics(args: dict) -> dict:
@@ -394,10 +417,9 @@ class AgentWorkflow(Workflow):
     async def route(
         self, ctx: Context, ev: StartEvent | RouteEvent
     ) -> ToolCallEvent | FinalAnswerEvent | GiveUpEvent:
-        # StartEvent ---> RouteEvent: intent routing. TOOL_SCHEMAS is the
-        # same tool menu as before (query_database / run_analytics /
-        # search_employee_comments / analyze_sentiment); the LLM decides
-        # which one(s) apply to the question, unchanged from the old loop.
+        # StartEvent ---> RouteEvent: intent routing. Specific-question
+        # averages take the deterministic query_database fast path; all other
+        # questions use the same LLM tool menu as before.
         if isinstance(ev, StartEvent):
             messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
             messages.extend(ev.get("history") or [])
@@ -411,6 +433,31 @@ class AgentWorkflow(Workflow):
 
         if iteration > config.AGENT_MAX_TOOL_ITERATIONS:
             return GiveUpEvent(trace=trace, iteration=config.AGENT_MAX_TOOL_ITERATIONS)
+
+        if isinstance(ev, StartEvent) and _is_specific_question_average(ev.get("user_message")):
+            tool_call_id = "direct-question-average"
+            arguments = {"question": ev.get("user_message")}
+            messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "query_database",
+                        "arguments": json.dumps(arguments),
+                    },
+                }],
+            })
+            return ToolCallEvent(
+                tool_call_id=tool_call_id,
+                tool_name="query_database",
+                arguments=arguments,
+                messages=messages,
+                trace=trace,
+                iteration=iteration,
+                batch_size=1,
+            )
 
         response = await asyncio.to_thread(
             chat_complete,
