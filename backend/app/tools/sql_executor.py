@@ -4,7 +4,7 @@ SQL Executor tool.
 Takes a SQL string (produced by app.tools.sql_generator, or typed by hand
 during testing) and runs it SAFELY against the read-only SQLite database.
 
-This module has NO dependency on Mistral or LlamaIndex - it is pure
+This module has NO dependency on Groq or LlamaIndex - it is pure
 sqlite3 + string safety checks, so it can be fully unit-tested without an
 API key (see tests/test_sql_executor.py).
 

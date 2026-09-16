@@ -6,8 +6,8 @@ Run from the project root (with the venv active), AFTER scripts/build_db.py:
     python scripts/build_index.py            # index all rows (default)
     python scripts/build_index.py --limit 50 # fast smoke test, ~50 rows
 
-Requires MISTRAL_API_KEY - this step calls the Mistral embeddings API once
-per indexed comment (batched internally by LlamaIndex).
+Embeds locally via HuggingFace/sentence-transformers - no API key required.
+The first run downloads the embedding model (see app.config.EMBED_MODEL_NAME).
 """
 
 import argparse

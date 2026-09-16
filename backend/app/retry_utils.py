@@ -1,10 +1,10 @@
 """
-Shared retry/backoff policy for LLM API calls.
+Shared retry/backoff policy for Groq API calls.
 
-Groq (chat completions) and Mistral (embeddings, the only thing it's still
-used for) both rate-limit under real usage. Every direct call into either
-SDK goes through this same retry policy so a transient rate limit never
-surfaces as a hard failure to the user or to a tool's verification step.
+Groq (chat completions, the only external API this project calls) rate-
+limits under real usage. Every direct call into the SDK goes through this
+same retry policy so a transient rate limit never surfaces as a hard
+failure to the user or to a tool's verification step.
 """
 
 from __future__ import annotations

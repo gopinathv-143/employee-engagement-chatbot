@@ -119,7 +119,7 @@ def analyze_sentiment(items: list[dict]) -> SentimentResult:
             return SentimentResult(
                 ok=False,
                 error="Sentiment classification failed (could not parse a valid "
-                      "response from Mistral).",
+                      "response from Groq).",
             )
         all_results.extend(classified)
 

@@ -22,6 +22,14 @@ from __future__ import annotations
 
 _ALLOWED_SENTIMENTS = {"Positive", "Neutral", "Negative"}
 
+# Column-name substrings that mark a value as an aggregate (AVG/SUM/MIN/MAX -
+# unlike COUNT, these return NULL, not 0, when the WHERE clause matched zero
+# underlying rows). A NULL here almost always means the generated SQL's
+# filter value (e.g. an exact Question= match) doesn't exist verbatim in the
+# data - most often because the model guessed at free text instead of using
+# a real stored value - not a legitimate "the average of nothing" answer.
+_AGGREGATE_NAME_HINTS = ("avg", "sum", "min", "max", "mean")
+
 
 def _result(valid: bool, issues: list[str]) -> dict:
     return {"valid": valid, "issues": issues}
@@ -42,6 +50,18 @@ def verify_query_database(result: dict) -> dict:
         row_keys = set(rows[0].keys())
         if not row_keys.issubset(set(columns)) and not set(columns).issubset(row_keys):
             issues.append("Row keys do not match reported columns.")
+
+    null_aggregate_issues = [
+        f"Aggregate column '{key}' is NULL - the query's filter almost certainly "
+        f"matched zero underlying rows (e.g. an exact-match value that isn't a real "
+        f"stored value). Do not report this as a real answer - find the correct "
+        f"filter value (list distinct values if unsure) and retry."
+        for row in rows
+        for key, value in row.items()
+        if value is None and any(hint in key.lower() for hint in _AGGREGATE_NAME_HINTS)
+    ]
+    if null_aggregate_issues:
+        return _result(False, null_aggregate_issues)
 
     if result.get("row_count", 0) == 0:
         # Not necessarily wrong (a legitimately empty answer is possible),
@@ -90,16 +110,21 @@ def verify_analytics(result: dict) -> dict:
     if not data:
         issues.append("Analytics returned no data - confirm this is expected before answering.")
 
-    issues = hard_issues + issues
+    # Surface any filter-resolution notes from _apply_filters (e.g. a
+    # semantic fallback substitution, or a filter value that matched
+    # nothing even after semantic lookup) so the agent sees exactly what
+    # happened rather than just a raw number.
+    issues = hard_issues + issues + list(result.get("notes") or [])
     return _result(len(hard_issues) == 0, issues)
 
 
 def verify_retrieval(result: dict, query: str) -> dict:
     issues: list[str] = []
+    notes = list(result.get("notes") or [])
     results = result.get("results", [])
     if not results:
         issues.append(f"No employee comments were retrieved for query: '{query}'.")
-        return _result(False, issues)
+        return _result(False, issues + notes)
 
     for r in results:
         if not r.get("text", "").strip():
@@ -107,7 +132,7 @@ def verify_retrieval(result: dict, query: str) -> dict:
         if r.get("score") is not None and r["score"] < 0:
             issues.append(f"Suspicious negative similarity score on {r.get('response_id')}.")
 
-    return _result(True, issues)
+    return _result(True, issues + notes)
 
 
 def verify_sentiment(result: dict) -> dict:

@@ -1,6 +1,7 @@
 # --- Core data handling ---
 pandas>=2.2
 openpyxl>=3.1
+numpy>=1.26
 
 # --- Config ---
 python-dotenv>=1.0
@@ -10,12 +11,11 @@ pydantic>=2.6
 # generation, and sentiment classification - OpenAI-compatible chat API) ---
 groq
 
-# --- Mistral SDK (embeddings only - Groq has no embeddings endpoint) ---
-mistralai
-
-# --- LlamaIndex (retrieval over employee free-text comments) ---
+# --- LlamaIndex (retrieval over employee free-text comments). Embeddings run
+# locally via HuggingFace/sentence-transformers - no embedding API key
+# needed; Groq is the only API key this project uses. ---
 llama-index-core
-llama-index-embeddings-mistralai
+llama-index-embeddings-huggingface
 
 # --- API layer ---
 fastapi>=0.115
@@ -24,6 +24,5 @@ uvicorn[standard]>=0.30
 # --- Testing (structured-data tools only; no API key required) ---
 pytest>=8.0
 
-# --- Retry/backoff for the embedding build step (this Mistral tier has a
-# fairly low embeddings rate limit; see app/indexing.py) ---
+# --- Retry/backoff for Groq rate limits ---
 tenacity>=9.0

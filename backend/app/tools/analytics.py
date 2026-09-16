@@ -8,7 +8,7 @@ single time (e.g. "percentage dissatisfied"). This tool complements
 query_database rather than replacing it - the agent picks whichever is the
 better fit for a given question.
 
-No Mistral/LlamaIndex dependency here either - pure pandas, so it is fully
+No Groq/LlamaIndex dependency here either - pure pandas, so it is fully
 unit-testable (see tests/test_analytics.py).
 """
 
@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from app.data_processing import build_dataset
+from app.tools import schema_index
 
 _ALLOWED_GROUP_COLUMNS = {
     "Department", "Role", "Theme", "Respondent_Type", "Company",
@@ -50,25 +51,57 @@ class AnalyticsResult:
     data: list[dict] = field(default_factory=list)
     total_matched: int = 0
     error: str | None = None
+    notes: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "ok": self.ok, "operation": self.operation, "params": self.params,
             "data": self.data, "total_matched": self.total_matched, "error": self.error,
+            "notes": self.notes,
         }
 
 
-def _apply_filters(df: pd.DataFrame, filters: dict | None) -> tuple[pd.DataFrame, str | None]:
+def _apply_filters(df: pd.DataFrame, filters: dict | None) -> tuple[pd.DataFrame, str | None, list[str]]:
+    notes: list[str] = []
     if not filters:
-        return df, None
+        return df, None, notes
+
     for col, val in filters.items():
         if col not in _ALLOWED_FILTER_COLUMNS:
-            return df, f"Cannot filter on column '{col}'."
+            return df, f"Cannot filter on column '{col}'.", notes
+
         if col == "Rating":
             df = df[df["Rating"] == int(val)]
+            continue
+
+        exact_mask = df[col].astype(str).str.lower() == str(val).lower()
+        if exact_mask.any():
+            df = df[exact_mask]
+            continue
+
+        # No exact (case-insensitive) match - the caller almost always meant
+        # a real value but paraphrased it (e.g. "pay and benefits" for the
+        # actual Theme 'Compensation & Benefits'). Try a semantic fallback
+        # against this column's real distinct values instead of silently
+        # returning zero rows.
+        match = schema_index.best_match(col, str(val), min_score=schema_index.DEFAULT_MATCH_THRESHOLD)
+        if match is not None:
+            notes.append(
+                f"Filter {col}='{val}' had no exact match; used the closest semantic "
+                f"match '{match.value}' (similarity {match.score:.2f}) instead."
+            )
+            df = df[df[col].astype(str).str.lower() == match.value.lower()]
         else:
-            df = df[df[col].astype(str).str.lower() == str(val).lower()]
-    return df, None
+            candidates = schema_index.resolve(col, str(val), top_k=3)
+            hint = (
+                "; closest real values: "
+                + ", ".join(f"'{c.value}' ({c.score:.2f})" for c in candidates)
+                if candidates else ""
+            )
+            notes.append(f"Filter {col}='{val}' matched no rows, even after semantic lookup{hint}.")
+            df = df[exact_mask]  # empty
+
+    return df, None, notes
 
 
 def _percentage(df: pd.DataFrame, params: dict) -> AnalyticsResult:
@@ -77,13 +110,13 @@ def _percentage(df: pd.DataFrame, params: dict) -> AnalyticsResult:
     if column not in _ALLOWED_FILTER_COLUMNS:
         return AnalyticsResult(False, "percentage", params, error=f"Unsupported column '{column}'.")
 
-    filtered, err = _apply_filters(df, params.get("filters"))
+    filtered, err, notes = _apply_filters(df, params.get("filters"))
     if err:
         return AnalyticsResult(False, "percentage", params, error=err)
 
     total = len(filtered)
     if total == 0:
-        return AnalyticsResult(True, "percentage", params, data=[], total_matched=0)
+        return AnalyticsResult(True, "percentage", params, data=[], total_matched=0, notes=notes)
 
     if column == "Rating":
         matches = int((filtered["Rating"] == int(value)).sum())
@@ -94,7 +127,7 @@ def _percentage(df: pd.DataFrame, params: dict) -> AnalyticsResult:
     return AnalyticsResult(
         True, "percentage", params,
         data=[{"matching_count": matches, "total_count": total, "percentage": pct}],
-        total_matched=total,
+        total_matched=total, notes=notes,
     )
 
 
@@ -104,7 +137,7 @@ def _average_by_group(df: pd.DataFrame, params: dict) -> AnalyticsResult:
         return AnalyticsResult(False, "average_by_group", params,
                                 error=f"Unsupported group_by column '{group_by}'.")
 
-    filtered, err = _apply_filters(df, params.get("filters"))
+    filtered, err, notes = _apply_filters(df, params.get("filters"))
     if err:
         return AnalyticsResult(False, "average_by_group", params, error=err)
 
@@ -118,7 +151,7 @@ def _average_by_group(df: pd.DataFrame, params: dict) -> AnalyticsResult:
     return AnalyticsResult(
         True, "average_by_group", params,
         data=grouped.to_dict(orient="records"),
-        total_matched=len(filtered),
+        total_matched=len(filtered), notes=notes,
     )
 
 
@@ -128,7 +161,7 @@ def _count_by_group(df: pd.DataFrame, params: dict) -> AnalyticsResult:
         return AnalyticsResult(False, "count_by_group", params,
                                 error=f"Unsupported group_by column '{group_by}'.")
 
-    filtered, err = _apply_filters(df, params.get("filters"))
+    filtered, err, notes = _apply_filters(df, params.get("filters"))
     if err:
         return AnalyticsResult(False, "count_by_group", params, error=err)
 
@@ -139,12 +172,12 @@ def _count_by_group(df: pd.DataFrame, params: dict) -> AnalyticsResult:
     return AnalyticsResult(
         True, "count_by_group", params,
         data=counts.to_dict(orient="records"),
-        total_matched=len(filtered),
+        total_matched=len(filtered), notes=notes,
     )
 
 
 def _rating_distribution(df: pd.DataFrame, params: dict) -> AnalyticsResult:
-    filtered, err = _apply_filters(df, params.get("filters"))
+    filtered, err, notes = _apply_filters(df, params.get("filters"))
     if err:
         return AnalyticsResult(False, "rating_distribution", params, error=err)
 
@@ -155,7 +188,7 @@ def _rating_distribution(df: pd.DataFrame, params: dict) -> AnalyticsResult:
          "percentage": round(100.0 * c / total, 2) if total else 0.0}
         for r, c in dist.items()
     ]
-    return AnalyticsResult(True, "rating_distribution", params, data=data, total_matched=total)
+    return AnalyticsResult(True, "rating_distribution", params, data=data, total_matched=total, notes=notes)
 
 
 def _trend(df: pd.DataFrame, params: dict) -> AnalyticsResult:
@@ -163,7 +196,7 @@ def _trend(df: pd.DataFrame, params: dict) -> AnalyticsResult:
     if metric not in ("avg_rating", "count"):
         return AnalyticsResult(False, "trend", params, error="metric must be 'avg_rating' or 'count'.")
 
-    filtered, err = _apply_filters(df, params.get("filters"))
+    filtered, err, notes = _apply_filters(df, params.get("filters"))
     if err:
         return AnalyticsResult(False, "trend", params, error=err)
 
@@ -174,7 +207,7 @@ def _trend(df: pd.DataFrame, params: dict) -> AnalyticsResult:
         series = filtered.groupby("Response_Month").size()
         data = [{"month": m, "count": int(v)} for m, v in series.sort_index().items()]
 
-    return AnalyticsResult(True, "trend", params, data=data, total_matched=len(filtered))
+    return AnalyticsResult(True, "trend", params, data=data, total_matched=len(filtered), notes=notes)
 
 
 _OPERATIONS = {

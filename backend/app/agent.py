@@ -1,16 +1,16 @@
 """
-Step 4: The Mistral agent - orchestrates tool selection, execution,
+Step 4: The Groq agent - orchestrates tool selection, execution,
 verification, and retry, then writes the final answer.
 
 Design:
-  - Mistral does the reasoning (which tool(s) to call, with what arguments,
+  - Groq does the reasoning (which tool(s) to call, with what arguments,
     and how to phrase the final answer). It NEVER computes a number or
     quotes a comment itself - it is only allowed to report what a tool
     returned.
   - Every tool call is followed, in Python (not by asking the LLM), by the
     matching verification function from app.tools.verification. The
     verification outcome is appended alongside the raw tool result before
-    being sent back to Mistral, so the model always sees "here is the data,
+    being sent back to Groq, so the model always sees "here is the data,
     and here is whether it passed sanity checks" together.
   - If a tool result fails verification, the model is told explicitly and
     is expected to either retry (e.g. a different query/operation) or,
@@ -79,6 +79,15 @@ Tool selection guide:
 - "What do employees say about X", concerns, opinions, complaints, themes -> \
   search_employee_comments, and then call analyze_sentiment on the retrieved \
   comments' texts before describing the overall sentiment/tone
+- "Why", "reasons", "explain" as a FOLLOW-UP about a rating/percentage/trend \
+  you already reported earlier in this conversation -> identify the specific \
+  theme/department/filter that number was about (from your own prior answer, \
+  or the filters you used in the tool call that produced it) and call \
+  search_employee_comments with that same filter, then analyze_sentiment on \
+  the results. Do not just restate the earlier number - a "why" question \
+  needs real comment text as evidence, not a repeated statistic. If nothing \
+  in the conversation so far establishes what "the rating" refers to, ask \
+  the user to clarify rather than guessing at a filter.
 - If a question needs more than one of these (e.g. "what's the sentiment on \
   compensation, and what percentage rated it below 3"), call multiple tools \
   and combine their verified results.
@@ -90,13 +99,22 @@ operation/filters/wording) and try again, or, if you are out of reasonable \
 options, tell the user plainly that you could not find a reliable answer \
 instead of guessing.
 
-When you do have verified results, write a clear, concise natural-language \
-answer that cites the actual numbers/quotes returned by the tools. Do not \
-show raw JSON to the user. Rating is an INTEGER on a 1-5 scale (1 worst, 5 \
-best), so report database averages on that scale. Only provide a 0-10 \
-equivalent when the user explicitly requests it, calculated as the verified \
-1-5 average multiplied by 2, and label it as a 0-10 equivalent. Keep answers \
-focused and readable.
+When you do have verified results, write an answer an HR reader can act on \
+without opening the underlying data - not just a bare number. Do not show raw \
+JSON to the user. Rating is an INTEGER on a 1-5 scale (1 worst, 5 best), so \
+report database averages on that scale. Only provide a 0-10 equivalent when \
+the user explicitly requests it, calculated as the verified 1-5 average \
+multiplied by 2, and label it as a 0-10 equivalent.
+
+Whenever a tool result includes it, state the sample size behind a number \
+(e.g. "3.7 out of 5, based on 145 responses") - a number with no denominator \
+isn't decision-grade for HR. Briefly characterize where it falls (e.g. "on \
+the higher end", "roughly average", "a clear concern area") rather than \
+leaving the reader to judge a bare figure in isolation. If the result breaks \
+down by a group (department, theme, month, etc.), call out the highest and \
+lowest instead of just repeating the average across the board, and mention \
+that the full breakdown is visible below. Stay to 3-5 sentences - add \
+substance (n, context, the standout group), not filler.
 """
 
 _SPECIFIC_QUESTION_AVERAGE_RE = re.compile(

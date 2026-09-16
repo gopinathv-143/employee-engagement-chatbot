@@ -1,0 +1,5 @@
+# --- Streamlit UI (frontend/app.py). Talks to the backend over HTTP
+# (see backend/app/main.py) - no direct dependency on backend/ code. ---
+streamlit>=1.38
+requests>=2.31
+pandas>=2.2

@@ -2,11 +2,11 @@
 Step 2: LlamaIndex retrieval over employee free-text comments.
 
 Builds one Document per survey row that has a non-empty Comment, embeds it
-with Mistral's embedding model, and persists a VectorStoreIndex to disk so
-it only needs to be built once. Metadata (department, role, theme,
-question, rating, date, etc.) is preserved on every node so retrieved
-results can be filtered, cited, and cross-referenced with the SQL/analytics
-tools.
+with a local HuggingFace/sentence-transformers embedding model (no API key,
+runs on this machine), and persists a VectorStoreIndex to disk so it only
+needs to be built once. Metadata (department, role, theme, question,
+rating, date, etc.) is preserved on every node so retrieved results can be
+filtered, cited, and cross-referenced with the SQL/analytics tools.
 
 This module is intentionally retrieval-only: it returns raw matched nodes
 with their metadata, NOT an LLM-synthesized answer. Keeping retrieval and
@@ -18,7 +18,6 @@ write a final answer from them.
 from __future__ import annotations
 
 import sys
-import time
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -29,11 +28,11 @@ from llama_index.core import (
     VectorStoreIndex,
     load_index_from_storage,
 )
-from llama_index.embeddings.mistralai import MistralAIEmbedding
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from app import config
 from app.data_processing import build_dataset
-from app.retry_utils import rate_limit_retry
+from app.tools import schema_index
 
 METADATA_KEYS = [
     "Response_ID", "Company", "Respondent_Type", "Department", "Role",
@@ -45,16 +44,14 @@ METADATA_KEYS = [
 # for the LLM to see and for filtering).
 _EXCLUDED_FROM_EMBEDDING = ["Response_ID", "Company", "Response_Date"]
 
-# This project's Mistral tier has a fairly low embeddings rate limit, so the
-# index is built in small, paced, retryable batches rather than one bulk
-# from_documents() call (which has no backoff and dies on the first 429).
-_INDEX_INSERT_BATCH_SIZE = 20
-_INDEX_BATCH_PAUSE_SECONDS = 1.5
+# Local embedding model has no rate limit, so the index is built in one
+# batch rather than the small paced batches an external embeddings API
+# would need.
+_INDEX_INSERT_BATCH_SIZE = 200
 
 _index_cache: VectorStoreIndex | None = None
 
 
-@rate_limit_retry
 def _insert_batch(index: VectorStoreIndex, nodes_batch: list[Document]) -> None:
     index.insert_nodes(nodes_batch)
 
@@ -63,9 +60,7 @@ def _configure_settings() -> None:
     # No Settings.llm here on purpose: this module only ever retrieves
     # (index.as_retriever().retrieve(...)), which needs embed_model only.
     # Answer generation from retrieved comments is Groq's job, in app.agent.
-    Settings.embed_model = MistralAIEmbedding(
-        model_name=config.MISTRAL_EMBED_MODEL, api_key=config.MISTRAL_API_KEY
-    )
+    Settings.embed_model = HuggingFaceEmbedding(model_name=config.EMBED_MODEL_NAME)
 
 
 def _rows_to_documents(df: pd.DataFrame) -> list[Document]:
@@ -127,8 +122,6 @@ def build_or_load_index(
         _insert_batch(index, batch)
         done = min(i + _INDEX_INSERT_BATCH_SIZE, total)
         print(f"  indexed {done}/{total} documents", file=sys.stderr)
-        if done < total:
-            time.sleep(_INDEX_BATCH_PAUSE_SECONDS)
 
     storage_dir.mkdir(parents=True, exist_ok=True)
     index.storage_context.persist(persist_dir=str(storage_dir))
@@ -161,11 +154,13 @@ class RetrievalResult:
     results: list[dict] = field(default_factory=list)
     count: int = 0
     error: str | None = None
+    notes: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "ok": self.ok, "query": self.query,
             "results": self.results, "count": self.count, "error": self.error,
+            "notes": self.notes,
         }
 
 
@@ -177,6 +172,51 @@ def _matches_filters(metadata: dict, filters: dict | None) -> bool:
         if node_value is None or str(node_value).lower() != str(value).lower():
             return False
     return True
+
+
+def _resolve_filters(filters: dict | None) -> tuple[dict, list[str]]:
+    """Resolve each filter value to its real stored form before matching
+    against node metadata - same paraphrase problem the SQL/analytics tools
+    had (e.g. {"Department": "the finance folks"} matching nothing exact),
+    fixed the same way: fall back to the closest semantic match above
+    schema_index.DEFAULT_MATCH_THRESHOLD, and report what happened rather
+    than silently returning zero results."""
+    if not filters:
+        return {}, []
+
+    resolved: dict = {}
+    notes: list[str] = []
+    for col, val in filters.items():
+        if col not in schema_index.SEMANTIC_COLUMNS:
+            resolved[col] = val
+            continue
+
+        exact = next(
+            (v for v in schema_index.distinct_values(col) if v.lower() == str(val).lower()),
+            None,
+        )
+        if exact is not None:
+            resolved[col] = exact
+            continue
+
+        match = schema_index.best_match(col, str(val), min_score=schema_index.DEFAULT_MATCH_THRESHOLD)
+        if match is not None:
+            notes.append(
+                f"Filter {col}='{val}' had no exact match; used the closest semantic "
+                f"match '{match.value}' (similarity {match.score:.2f}) instead."
+            )
+            resolved[col] = match.value
+        else:
+            candidates = schema_index.resolve(col, str(val), top_k=3)
+            hint = (
+                "; closest real values: "
+                + ", ".join(f"'{c.value}' ({c.score:.2f})" for c in candidates)
+                if candidates else ""
+            )
+            notes.append(f"Filter {col}='{val}' matched no comments, even after semantic lookup{hint}.")
+            resolved[col] = val  # unresolved - deliberately won't match anything below
+
+    return resolved, notes
 
 
 def search_employee_comments(
@@ -191,6 +231,8 @@ def search_employee_comments(
     except Exception as exc:  # noqa: BLE001 - surface as a tool-level error
         return RetrievalResult(ok=False, query=query, error=str(exc))
 
+    resolved_filters, notes = _resolve_filters(filters)
+
     try:
         # Over-fetch, then apply metadata filters in Python, then trim -
         # keeps filtering logic simple and version-independent.
@@ -199,7 +241,7 @@ def search_employee_comments(
     except Exception as exc:  # noqa: BLE001
         return RetrievalResult(ok=False, query=query, error=f"Retrieval failed: {exc}")
 
-    matched = [n for n in nodes if _matches_filters(n.metadata, filters)][:top_k]
+    matched = [n for n in nodes if _matches_filters(n.metadata, resolved_filters)][:top_k]
 
     results = []
     for n in matched:
@@ -219,7 +261,7 @@ def search_employee_comments(
             ).as_dict()
         )
 
-    return RetrievalResult(ok=True, query=query, results=results, count=len(results))
+    return RetrievalResult(ok=True, query=query, results=results, count=len(results), notes=notes)
 
 
 def _strip_theme_prefix(text: str) -> str:

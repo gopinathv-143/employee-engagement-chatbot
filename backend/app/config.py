@@ -27,14 +27,13 @@ def _resolve(path_str: str) -> Path:
 
 
 # --- Groq (chat completions: the tool-calling agent, SQL generation,
-# sentiment classification) ---
+# sentiment classification) - the only API key this project needs. ---
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 GROQ_CHAT_MODEL: str = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
 
-# --- Mistral (embeddings only - Groq has no embeddings endpoint, and the
-# persisted vector store in storage/ was already built with this model) ---
-MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
-MISTRAL_EMBED_MODEL: str = os.getenv("MISTRAL_EMBED_MODEL", "mistral-embed")
+# --- Embeddings (comment retrieval only). Runs locally via HuggingFace/
+# sentence-transformers - no API key, no external service. ---
+EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 
 # --- Data ---
 DATA_FILE: Path = _resolve(os.getenv("DATA_FILE", "data/employee_engagement_5000.xlsx"))
@@ -61,14 +60,3 @@ def require_groq_key() -> str:
             "in a real key from https://console.groq.com/keys."
         )
     return GROQ_API_KEY
-
-
-def require_mistral_key() -> str:
-    """Raise a clear, early error if the Mistral API key (embeddings) is missing."""
-    if not MISTRAL_API_KEY:
-        raise RuntimeError(
-            "MISTRAL_API_KEY is not set. Copy .env.example to .env and fill "
-            "in a real key from https://console.mistral.ai/ (used for "
-            "embeddings only)."
-        )
-    return MISTRAL_API_KEY

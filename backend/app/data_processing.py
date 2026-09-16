@@ -7,7 +7,7 @@ Responsibilities of this module ONLY:
   - Persist the cleaned data into SQLite (the source of truth for every
     structured-data tool: SQL generator/executor, analytics).
 
-This module does NOT know about LlamaIndex, Mistral, or FastAPI. Keeping it
+This module does NOT know about LlamaIndex, Groq, or FastAPI. Keeping it
 self-contained means it can be unit-tested with plain pandas/sqlite, with no
 API key required (see tests/test_data_processing.py).
 """
@@ -184,30 +184,53 @@ def build_dataset(force_rebuild: bool = False) -> tuple[pd.DataFrame, CleaningRe
     return df, report
 
 
+_CATEGORY_COLUMNS = ["Company", "Respondent_Type", "Department", "Role", "Theme", "Employee_Feedback"]
+_category_values_cache: dict[str, list[str]] | None = None
+
+
+def _get_category_values() -> dict[str, list[str]]:
+    """Distinct values for every small closed-vocabulary column, read once
+    from the actual data rather than hand-maintained in this docstring -
+    keeps the SQL generator's grounding exact even as the dataset changes,
+    and (unlike a partial 'e.g.' list) lets it write a correct equality
+    filter for every real Department/Role value, not just the common ones."""
+    global _category_values_cache
+    if _category_values_cache is None:
+        df, _ = build_dataset(force_rebuild=False)
+        _category_values_cache = {
+            col: sorted(v for v in df[col].astype(str).unique() if v.strip())
+            for col in _CATEGORY_COLUMNS
+        }
+    return _category_values_cache
+
+
+def reset_category_cache() -> None:
+    """Used by tests / after re-ingesting data mid-process."""
+    global _category_values_cache
+    _category_values_cache = None
+
+
 def get_schema_description() -> str:
     """Human-readable schema description used to ground the SQL generator."""
+    values = _get_category_values()
+
+    def _list(col: str) -> str:
+        return ", ".join(f"'{v}'" for v in values[col])
+
     return f"""Table: {config.SQL_TABLE_NAME}
 Columns:
   Response_ID TEXT       - unique survey response identifier, e.g. 'ABG-00001'
-  Company TEXT            - company name (mostly a single constant value in this dataset)
-  Respondent_Type TEXT     - one of 'Employee', 'Worker', 'HR'
-  Department TEXT           - department name, e.g. 'Finance', 'Operations'
-  Role TEXT                  - job role/title, e.g. 'Analyst', 'Manager'
+  Company TEXT            - one of: {_list("Company")}
+  Respondent_Type TEXT     - one of: {_list("Respondent_Type")}
+  Department TEXT           - one of: {_list("Department")}
+  Role TEXT                  - one of: {_list("Role")}
   Tenure_Years REAL            - years of tenure, decimal
-  Theme TEXT                    - survey theme/category, e.g. 'Job Satisfaction',
-                                   'Compensation & Benefits', 'Leadership & Trust',
-                                   'Manager Support', 'Performance Management',
-                                   'Work Environment', 'Team Collaboration',
-                                   'Learning & Development', 'Employee Wellbeing',
-                                   'Workplace Safety', 'Work-Life Balance',
-                                   'Communication', 'Career Growth & Mobility',
-                                   'Rewards & Recognition', 'Technology & Tools'
+  Theme TEXT                    - survey theme/category, one of: {_list("Theme")}
   Question TEXT                  - the exact survey question text
   Rating INTEGER                  - 1 (worst) to 5 (best)
   Comment TEXT                     - free-text employee comment (may be empty)
-  Employee_Feedback TEXT            - short label derived from rating, one of
-                                       'Very Dissatisfied','Dissatisfied','Neutral',
-                                       'Satisfied','Very Satisfied'
+  Employee_Feedback TEXT            - short label derived from rating, one of: \
+{_list("Employee_Feedback")}
   Response_Date TEXT                 - ISO date 'YYYY-MM-DD'
   Response_Month TEXT                 - 'YYYY-MM', derived, for trend grouping
 
@@ -215,4 +238,7 @@ Notes for SQL generation:
   - This is SQLite. Use SQLite functions only (e.g. strftime, not DATE_TRUNC).
   - Only SELECT statements are allowed.
   - Always alias aggregate columns with a readable name (e.g. AVG(Rating) AS avg_rating).
+  - Department/Role/Theme/Employee_Feedback/Respondent_Type/Company are closed \
+vocabularies - always filter using one of the exact values listed above, never a \
+paraphrase of one.
 """

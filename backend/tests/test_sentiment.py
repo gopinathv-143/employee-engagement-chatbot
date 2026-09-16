@@ -1,5 +1,5 @@
 """
-Unit tests for app.tools.sentiment. The Mistral client is mocked - these
+Unit tests for app.tools.sentiment. The Groq client is mocked - these
 tests check the JSON parsing / fallback-coverage logic, not the live API
 (that's covered by the manual smoke test in scripts/ask.py once you have a
 working key).

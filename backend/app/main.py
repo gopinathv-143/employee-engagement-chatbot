@@ -14,6 +14,7 @@ server (see app.agent, and the manual test script scripts/ask.py).
 
 from __future__ import annotations
 
+import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -78,13 +79,31 @@ app = FastAPI(
 
 @app.get("/health")
 def health() -> dict:
+    db_exists = config.SQLITE_DB_PATH.exists()
+    response_count = None
+    if db_exists:
+        # Cheap enough to read on every health check (single COUNT(*) on an
+        # indexed table) - lets the frontend show a live "N responses"
+        # figure without a dedicated endpoint.
+        try:
+            conn = sqlite3.connect(config.SQLITE_DB_PATH)
+            try:
+                response_count = conn.execute(
+                    f"SELECT COUNT(*) FROM {config.SQL_TABLE_NAME}"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            response_count = None
+
     return {
         "status": "ok",
-        "db_exists": config.SQLITE_DB_PATH.exists(),
+        "db_exists": db_exists,
         "index_exists": config.INDEX_STORAGE_DIR.exists()
         and any(config.INDEX_STORAGE_DIR.iterdir()),
         "chat_model": config.GROQ_CHAT_MODEL,
-        "embed_model": config.MISTRAL_EMBED_MODEL,
+        "embed_model": config.EMBED_MODEL_NAME,
+        "response_count": response_count,
     }
 
 

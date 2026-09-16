@@ -17,6 +17,7 @@ import re
 from app import config
 from app.data_processing import get_schema_description
 from app.groq_client import chat_complete
+from app.tools import schema_index
 
 _FEW_SHOT = """Examples:
 
@@ -24,16 +25,16 @@ Q: How many employees are there in total?
 SQL: SELECT COUNT(DISTINCT Response_ID) AS employee_count FROM engagement;
 
 Q: What is the average rating for the Compensation & Benefits theme?
-SQL: SELECT AVG(Rating) AS avg_rating FROM engagement WHERE Theme = 'Compensation & Benefits';
+SQL: SELECT AVG(Rating) AS avg_rating, COUNT(*) AS response_count FROM engagement WHERE Theme = 'Compensation & Benefits';
 
 Q: How many responses are Very Dissatisfied in the Finance department?
 SQL: SELECT COUNT(*) AS count FROM engagement WHERE Department = 'Finance' AND Employee_Feedback = 'Very Dissatisfied';
 
 Q: Show the average rating per department, highest first.
-SQL: SELECT Department, AVG(Rating) AS avg_rating FROM engagement GROUP BY Department ORDER BY avg_rating DESC;
+SQL: SELECT Department, AVG(Rating) AS avg_rating, COUNT(*) AS response_count FROM engagement GROUP BY Department ORDER BY avg_rating DESC;
 
 Q: How has average rating trended by month for Work-Life Balance?
-SQL: SELECT Response_Month, AVG(Rating) AS avg_rating FROM engagement WHERE Theme = 'Work-Life Balance' GROUP BY Response_Month ORDER BY Response_Month;
+SQL: SELECT Response_Month, AVG(Rating) AS avg_rating, COUNT(*) AS response_count FROM engagement WHERE Theme = 'Work-Life Balance' GROUP BY Response_Month ORDER BY Response_Month;
 """
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a SQL generator for a SQLite database of employee \
@@ -49,9 +50,56 @@ Rules:
 - Never use INSERT/UPDATE/DELETE/DROP/ALTER or any other write statement.
 - Use single quotes for string literals and match the exact category values \
 given in the schema notes when possible.
+- The user's question may be prefixed with a "Semantic grounding" block listing \
+the real stored Question/Theme/Department/Role values closest to the question. \
+When present, use the exact string from that block for any filter it applies to \
+- do not write your own paraphrase of it.
+- Whenever you compute AVG(...), also SELECT a COUNT(*) (or COUNT(DISTINCT \
+Response_ID) if the query already groups rows) alongside it, aliased something \
+like response_count - a bare average with no sample size isn't useful to an HR \
+reader.
 """
 
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+# Columns worth grounding with semantic candidates: Question is free text
+# with no shared vocabulary to lean on; Theme/Department/Role are
+# high-cardinality-enough (15/36/18 values) that a paraphrase ("pay
+# fairness", "the accounts team") won't share tokens with the real value.
+_GROUNDING_COLUMNS = [
+    ("Question", "Closest matching survey Question values", 5),
+    ("Theme", "Closest matching Theme values", 3),
+    ("Department", "Closest matching Department values", 3),
+    ("Role", "Closest matching Role values", 3),
+]
+
+
+def _semantic_grounding_block(question: str) -> str:
+    """Rank each grounded column's real stored values by similarity to the
+    user's question, so the model can copy an exact value instead of
+    guessing/paraphrasing it into a WHERE clause that will match nothing.
+    Best-effort: if the embedding model isn't available for some reason,
+    generation still proceeds without grounding rather than failing."""
+    lines = []
+    for column, label, top_k in _GROUNDING_COLUMNS:
+        try:
+            matches = schema_index.resolve(column, question, top_k=top_k)
+        except Exception:
+            continue
+        if not matches:
+            continue
+        rendered = "; ".join(f"'{m.value}' (similarity {m.score:.2f})" for m in matches)
+        lines.append(f"  {label}: {rendered}")
+
+    if not lines:
+        return ""
+    return (
+        "\n\nSemantic grounding - these are the REAL stored values ranked by "
+        "similarity to the question above. If the question is asking about one of "
+        "these, you MUST copy the exact string shown (spelling and casing) into your "
+        "WHERE clause - never paraphrase, shorten, or invent a Question/Theme/"
+        "Department/Role value:\n" + "\n".join(lines)
+    )
 
 
 def _extract_sql(text: str) -> str:
@@ -77,7 +125,7 @@ def generate_sql(question: str, error_feedback: str | None = None) -> str:
         schema=get_schema_description(), few_shot=_FEW_SHOT
     )
 
-    user_content = f"Question: {question}"
+    user_content = f"Question: {question}" + _semantic_grounding_block(question)
     if error_feedback:
         user_content += (
             f"\n\nYour previous SQL failed with this error:\n{error_feedback}\n"
