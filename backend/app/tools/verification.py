@@ -63,14 +63,16 @@ def verify_query_database(result: dict) -> dict:
     if null_aggregate_issues:
         return _result(False, null_aggregate_issues)
 
+    notes = list(result.get("notes") or [])
+
     if result.get("row_count", 0) == 0:
         # Not necessarily wrong (a legitimately empty answer is possible),
         # but the agent should say so explicitly rather than guess - flag it
         # as a soft issue the caller can choose to surface, not a hard fail.
         issues.append("Query returned zero rows - confirm this is expected before answering.")
-        return _result(True, issues)
+        return _result(True, issues + notes)
 
-    return _result(True, issues)
+    return _result(True, issues + notes)
 
 
 def verify_analytics(result: dict) -> dict:

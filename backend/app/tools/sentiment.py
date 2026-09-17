@@ -18,6 +18,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+import groq
+
 from app import config
 from app.groq_client import chat_complete
 
@@ -64,7 +66,13 @@ def _classify_chunk(chunk: list[dict]) -> list[dict] | None:
             ],
         )
         raw = response.choices[0].message.content or ""
-    except Exception:  # noqa: BLE001 - API/network failure, let caller fall back
+    except groq.APIError:
+        # A Groq outage/rate-limit is a distinct failure class from "the
+        # model returned unparseable JSON" - let it propagate so
+        # agent.py::_run_tool can mark it service_unavailable instead of a
+        # generic parse failure the agent would otherwise retry into.
+        raise
+    except Exception:  # noqa: BLE001 - network failure, let caller fall back
         return None
 
     match = _JSON_OBJECT_RE.search(raw)

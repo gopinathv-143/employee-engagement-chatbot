@@ -81,6 +81,7 @@ def _semantic_grounding_block(question: str) -> str:
     Best-effort: if the embedding model isn't available for some reason,
     generation still proceeds without grounding rather than failing."""
     lines = []
+    question_top_score = None
     for column, label, top_k in _GROUNDING_COLUMNS:
         try:
             matches = schema_index.resolve(column, question, top_k=top_k)
@@ -88,18 +89,43 @@ def _semantic_grounding_block(question: str) -> str:
             continue
         if not matches:
             continue
+        if column == "Question":
+            question_top_score = matches[0].score
         rendered = "; ".join(f"'{m.value}' (similarity {m.score:.2f})" for m in matches)
         lines.append(f"  {label}: {rendered}")
 
     if not lines:
         return ""
-    return (
+
+    block = (
         "\n\nSemantic grounding - these are the REAL stored values ranked by "
         "similarity to the question above. If the question is asking about one of "
         "these, you MUST copy the exact string shown (spelling and casing) into your "
         "WHERE clause - never paraphrase, shorten, or invent a Question/Theme/"
         "Department/Role value:\n" + "\n".join(lines)
     )
+
+    # A full sentence can never equal a stored Question verbatim, so when
+    # even the BEST candidate is a weak match, writing
+    # `WHERE Question = '<the user's own wording>'` is guaranteed to return
+    # nothing - it's not a real attempt, just a wasted round trip (the topic
+    # likely isn't in the data at all, e.g. a team/department that isn't a
+    # real Theme/Department). Tell the model explicitly rather than leaving
+    # it to infer this from scores alone.
+    if question_top_score is not None and question_top_score < schema_index.DEFAULT_MATCH_THRESHOLD:
+        block += (
+            f"\n\nNone of the Question candidates above are a confident match "
+            f"(best similarity {question_top_score:.2f}, below "
+            f"{schema_index.DEFAULT_MATCH_THRESHOLD:.2f}). Do NOT write "
+            f"WHERE Question = '<the user's own wording>' - that is guaranteed to "
+            f"match nothing. Either use Question LIKE '%keyword%' with one short, "
+            f"distinctive keyword from the topic, or, if the topic genuinely has no "
+            f"matching survey data, write a query that makes that clear (e.g. "
+            f"SELECT DISTINCT Question FROM engagement WHERE Question LIKE "
+            f"'%keyword%') instead of guessing at an exact-match filter."
+        )
+
+    return block
 
 
 def _extract_sql(text: str) -> str:

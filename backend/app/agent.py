@@ -58,11 +58,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import groq
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
 
 from app import config
 from app.groq_client import chat_complete
 from app.tools import analytics, query_database, retrieval, sentiment, verification
+
+_SERVICE_UNAVAILABLE_MESSAGE = (
+    "The AI service is temporarily at capacity and couldn't process this "
+    "request. This isn't about your question - please try again in a few "
+    "minutes."
+)
 
 SYSTEM_PROMPT = """You are an HR analytics assistant for an employee engagement \
 survey dataset. You answer questions ONLY using the tools available to you - you \
@@ -98,6 +105,16 @@ valid, do NOT use it to answer - either adjust your tool call (different \
 operation/filters/wording) and try again, or, if you are out of reasonable \
 options, tell the user plainly that you could not find a reliable answer \
 instead of guessing.
+
+Once a tool call has PASSED verification against a Question/Theme that is \
+genuinely related to what the user asked - even if it isn't an exact wording \
+match - stop searching and use it. Compute the actual number from it and \
+answer, stating plainly that it's the closest matching survey item rather \
+than a literal match (e.g. "The survey doesn't ask that exact question, but \
+the closest related one is 'X', averaging Y"). Continuing to search for a \
+more perfectly-worded match instead of using a good verified result you \
+already have risks running out of attempts and giving up with nothing to \
+show, which is worse than an honest, clearly-caveated partial answer.
 
 When you do have verified results, write an answer an HR reader can act on \
 without opening the underlying data - not just a bare number. Do not show raw \
@@ -330,7 +347,13 @@ def _run_tool(name: str, args: dict) -> tuple[dict, dict]:
     """Execute one tool call and its mandatory verification step.
     Returns (result_dict, verification_dict). Never raises - any exception
     from the underlying tool is turned into a failed result so the agent
-    loop can react to it instead of crashing the whole request."""
+    loop can react to it instead of crashing the whole request.
+
+    Some tools (query_database's SQL generation, analyze_sentiment) make
+    their own Groq call, separate from the routing call in `route()`. A
+    Groq outage there is marked with `service_unavailable: True` instead of
+    a generic error, so `aggregate_results` can fail the whole turn fast
+    instead of re-routing into another doomed attempt at the same call."""
     impl = _TOOL_IMPLS.get(name)
     if impl is None:
         result = {"ok": False, "error": f"Unknown tool '{name}'."}
@@ -338,6 +361,9 @@ def _run_tool(name: str, args: dict) -> tuple[dict, dict]:
 
     try:
         result = impl(args)
+    except groq.APIError as exc:
+        result = {"ok": False, "error": str(exc), "service_unavailable": True}
+        return result, {"valid": False, "issues": [_SERVICE_UNAVAILABLE_MESSAGE]}
     except Exception as exc:  # noqa: BLE001 - a broken tool must not crash the agent
         result = {"ok": False, "error": f"Tool '{name}' raised an exception: {exc}"}
 
@@ -415,10 +441,16 @@ class FinalAnswerEvent(Event):
 class GiveUpEvent(Event):
     """RouteEvent -> GiveUpEvent: AGENT_MAX_TOOL_ITERATIONS reached without a
     verified answer - same honest-failure behaviour as before, just reached
-    via an event instead of a `for` loop running out."""
+    via an event instead of a `for` loop running out.
+
+    `message`, when set, overrides the default "couldn't verify" text - used
+    for a distinct failure class (the Groq API itself being unavailable/
+    rate-limited) where "try rephrasing your question" would be actively
+    misleading, since the question was never the problem."""
 
     trace: list[dict]
     iteration: int
+    message: str | None = None
 
 
 class AgentWorkflow(Workflow):
@@ -477,14 +509,27 @@ class AgentWorkflow(Workflow):
                 batch_size=1,
             )
 
-        response = await asyncio.to_thread(
-            chat_complete,
-            model=config.GROQ_CHAT_MODEL,
-            temperature=0.2,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-        )
+        try:
+            response = await asyncio.to_thread(
+                chat_complete,
+                model=config.GROQ_CHAT_MODEL,
+                temperature=0.2,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                tool_choice="auto",
+            )
+        except groq.APIError:
+            # groq_client.chat_complete already retried this internally
+            # (see retry_utils.rate_limit_retry - up to 8 attempts with
+            # growing backoff) before giving up, so a further per-iteration
+            # retry here would just repeat that same multi-minute wait for
+            # an outage that isn't going to clear in the next few seconds.
+            # Fail fast with an honest, distinct message instead of letting
+            # this propagate as an unhandled exception (-> a raw 500) or
+            # silently eating the rest of the iteration budget.
+            return GiveUpEvent(
+                trace=trace, iteration=iteration, message=_SERVICE_UNAVAILABLE_MESSAGE
+            )
         message = response.choices[0].message
 
         if not getattr(message, "tool_calls", None):
@@ -538,7 +583,7 @@ class AgentWorkflow(Workflow):
     @step
     async def aggregate_results(
         self, ctx: Context, ev: ToolResultEvent
-    ) -> RouteEvent | None:
+    ) -> RouteEvent | GiveUpEvent | None:
         # ToolResultEvent -> VerificationEvent (already applied in
         # execute_tool) -> fan-in: wait for every tool call from this round,
         # fold their (verified-or-not) results back into the conversation,
@@ -567,6 +612,16 @@ class AgentWorkflow(Workflow):
                 ),
             })
 
+        # If any tool in this round hit a Groq outage (SQL generation,
+        # sentiment classification - see _run_tool), re-routing would just
+        # ask the LLM to try again and very likely hit the same wall, one
+        # iteration at a time until AGENT_MAX_TOOL_ITERATIONS. Fail fast
+        # with the same honest message `route()` uses for a routing-call
+        # outage, instead of burning the rest of the budget on retries that
+        # can't succeed.
+        if any(r.result.get("service_unavailable") for r in batch):
+            return GiveUpEvent(trace=trace, iteration=ev.iteration, message=_SERVICE_UNAVAILABLE_MESSAGE)
+
         return RouteEvent(messages=messages, trace=trace, iteration=ev.iteration + 1)
 
     @step
@@ -577,13 +632,13 @@ class AgentWorkflow(Workflow):
         # ChatResult shape the FastAPI /chat endpoint has always expected.
         if isinstance(ev, GiveUpEvent):
             result = ChatResult(
-                answer=(
+                answer=ev.message or (
                     "I wasn't able to produce a fully verified answer to that question "
                     "after several attempts. Could you rephrase it, or narrow it down "
                     "(e.g. a specific department, theme, or time period)?"
                 ),
                 tool_trace=ev.trace,
-                iterations_used=config.AGENT_MAX_TOOL_ITERATIONS,
+                iterations_used=ev.iteration,
                 gave_up=True,
             )
         else:

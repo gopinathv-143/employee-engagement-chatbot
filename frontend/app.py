@@ -198,6 +198,8 @@ def render_query_database(entry: dict) -> None:
         st.caption("Query ran successfully but returned no rows.")
     if result.get("error"):
         st.error(result["error"])
+    for note in result.get("notes") or []:
+        st.info(note, icon="🧭")
 
 
 def render_run_analytics(entry: dict) -> None:
@@ -313,15 +315,31 @@ def _is_plain_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def render_headline(tool_trace: list) -> None:
+def render_headline(tool_trace: list, gave_up: bool = False) -> None:
     """Surface the single most decision-relevant number/chart from this
     turn immediately below the answer, with no click required - the
     verification badges and full SQL/tables stay in the "How this answer
     was put together" expander for anyone who wants to audit them, but an
-    HR reader scanning many answers needs the number-in-context up front."""
-    for entry in tool_trace:
+    HR reader scanning many answers needs the number-in-context up front.
+
+    Two correctness rules, not just a nice-to-have:
+    - If the agent gave up, show nothing here. tool_trace can still contain
+      an earlier tool call that technically succeeded before a later step
+      failed - headlining that number would flatly contradict the "I
+      wasn't able to produce a verified answer" text right above it.
+    - Walk the trace newest-first and skip anything verification didn't
+      pass. A multi-iteration turn can contain a superseded early attempt
+      with different (wrong) numbers before the agent corrected itself;
+      the headline must match what the final answer is actually based on,
+      not the first thing that happens to look numeric."""
+    if gave_up:
+        return
+
+    for entry in reversed(tool_trace):
         tool = entry.get("tool")
         result = entry.get("result") or {}
+        if not entry.get("verification", {}).get("valid", True):
+            continue
 
         if tool == "run_analytics" and result.get("ok") and result.get("data"):
             op = result["operation"]
@@ -393,12 +411,12 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
         if message.get("gave_up"):
             st.warning(
-                "The system could not fully verify this answer - treat it as "
-                "provisional and consider rephrasing the question.",
+                "This response is incomplete - see the message above for why, "
+                "and what to do next.",
                 icon="⚠️",
             )
         if message.get("tool_trace"):
-            render_headline(message["tool_trace"])
+            render_headline(message["tool_trace"], gave_up=message.get("gave_up", False))
             with st.expander("🔍 How this answer was put together"):
                 render_tool_trace(message["tool_trace"])
 
@@ -452,12 +470,12 @@ def ask(question: str) -> None:
             st.markdown(answer)
             if gave_up:
                 st.warning(
-                    "The system could not fully verify this answer - treat it "
-                    "as provisional and consider rephrasing the question.",
+                    "This response is incomplete - see the message above for why, "
+                    "and what to do next.",
                     icon="⚠️",
                 )
             if tool_trace:
-                render_headline(tool_trace)
+                render_headline(tool_trace, gave_up=gave_up)
                 with st.expander("🔍 How this answer was put together"):
                     render_tool_trace(tool_trace)
 
