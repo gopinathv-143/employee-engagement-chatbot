@@ -9,6 +9,7 @@ each) into something a non-technical reader can scan in a few seconds,
 instead of a JSON blob.
 """
 
+import random
 import time
 
 import pandas as pd
@@ -124,13 +125,41 @@ st.markdown(
 # Sidebar
 # -----------------------------
 
-EXAMPLE_QUESTIONS = [
+# A larger pool than we display at once, spanning the same tool categories
+# as before (a simple average, a percentage, a trend, a comment search, a
+# sentiment read) - `get_example_questions` below draws a random 5 from this
+# each time the app process starts, so the sidebar doesn't show the exact
+# same five prompts on every run without risking a question the backend
+# can't actually answer (these all map to real Theme/Rating columns).
+EXAMPLE_QUESTION_POOL = [
     "What is the average employee rating?",
     "What percentage of employees are dissatisfied with compensation?",
     "How has average rating trended by month?",
     "What are employees saying about workload?",
     "What is the sentiment regarding leadership?",
+    "What is the average rating for work-life balance?",
+    "Which theme has the lowest average rating?",
+    "What percentage of employees rated workplace safety below 3?",
+    "What are employees saying about career growth opportunities?",
+    "What is the sentiment regarding manager support?",
+    "How has the average rating for employee wellbeing trended by month?",
+    "What percentage of employees are satisfied with recognition and rewards?",
+    "What are employees saying about communication from leadership?",
+    "What is the average rating by department?",
+    "What is the sentiment regarding compensation and benefits?",
 ]
+
+
+@st.cache_resource
+def get_example_questions() -> list[str]:
+    """Picked once per running app process (cache_resource persists for the
+    server's lifetime across sessions/reruns, and resets on restart) so the
+    prompts refresh each time the project is (re)started, without shuffling
+    under a user's feet on every click within one run."""
+    return random.sample(EXAMPLE_QUESTION_POOL, k=5)
+
+
+EXAMPLE_QUESTIONS = get_example_questions()
 
 with st.sidebar:
     st.subheader("System status")

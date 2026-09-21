@@ -313,8 +313,10 @@ TOOL_SCHEMAS: list[dict] = [
 ]
 
 
-def _call_query_database(args: dict) -> dict:
-    result = query_database.query_database(question=args["question"]).as_dict()
+def _call_query_database(args: dict, user_message: str = "") -> dict:
+    result = query_database.query_database(
+        question=args["question"], match_question=user_message or None
+    ).as_dict()
     result["rating_scale"] = {
         "database": "Rating is INTEGER on a 1-5 scale (1 worst, 5 best)",
         "zero_to_ten_equivalent": "multiply a verified average by 2 only when explicitly requested",
@@ -322,13 +324,13 @@ def _call_query_database(args: dict) -> dict:
     return result
 
 
-def _call_run_analytics(args: dict) -> dict:
+def _call_run_analytics(args: dict, user_message: str = "") -> dict:
     return analytics.run_analytics(
         operation=args["operation"], params=args.get("params") or {}
     ).as_dict()
 
 
-def _call_search_employee_comments(args: dict) -> dict:
+def _call_search_employee_comments(args: dict, user_message: str = "") -> dict:
     return retrieval.search_employee_comments(
         query=args["query"],
         top_k=int(args.get("top_k") or 8),
@@ -336,11 +338,11 @@ def _call_search_employee_comments(args: dict) -> dict:
     ).as_dict()
 
 
-def _call_analyze_sentiment(args: dict) -> dict:
+def _call_analyze_sentiment(args: dict, user_message: str = "") -> dict:
     return sentiment.analyze_sentiment(items=args.get("items") or []).as_dict()
 
 
-_TOOL_IMPLS: dict[str, Callable[[dict], dict]] = {
+_TOOL_IMPLS: dict[str, Callable[[dict, str], dict]] = {
     "query_database": _call_query_database,
     "run_analytics": _call_run_analytics,
     "search_employee_comments": _call_search_employee_comments,
@@ -397,11 +399,18 @@ def _assistant_message_to_dict(message: Any) -> dict:
     return out
 
 
-def _run_tool(name: str, args: dict) -> tuple[dict, dict]:
+def _run_tool(name: str, args: dict, user_message: str = "") -> tuple[dict, dict]:
     """Execute one tool call and its mandatory verification step.
     Returns (result_dict, verification_dict). Never raises - any exception
     from the underlying tool is turned into a failed result so the agent
     loop can react to it instead of crashing the whole request.
+
+    `user_message` is the turn's original, unmodified user message (as
+    opposed to `args`, which for query_database may be an LLM-rephrased
+    sub-question) - passed through so query_database's closest-real-Question
+    fallback matches against what the user actually asked. See
+    query_database.query_database's docstring for why that distinction
+    matters.
 
     Some tools (query_database's SQL generation, analyze_sentiment) make
     their own Groq call, separate from the routing call in `route()`. A
@@ -414,7 +423,7 @@ def _run_tool(name: str, args: dict) -> tuple[dict, dict]:
         return result, {"valid": False, "issues": [result["error"]]}
 
     try:
-        result = impl(args)
+        result = impl(args, user_message)
     except groq.APIError as exc:
         result = {"ok": False, "error": str(exc), "service_unavailable": True}
         return result, {"valid": False, "issues": [_SERVICE_UNAVAILABLE_MESSAGE]}
@@ -450,6 +459,7 @@ class RouteEvent(Event):
     messages: list[dict]
     trace: list[dict]
     iteration: int
+    user_message: str
 
 
 class ToolCallEvent(Event):
@@ -464,6 +474,7 @@ class ToolCallEvent(Event):
     trace: list[dict]
     iteration: int
     batch_size: int
+    user_message: str
 
 
 class ToolResultEvent(Event):
@@ -481,6 +492,7 @@ class ToolResultEvent(Event):
     trace: list[dict]
     iteration: int
     batch_size: int
+    user_message: str
 
 
 class FinalAnswerEvent(Event):
@@ -525,22 +537,24 @@ class AgentWorkflow(Workflow):
         # averages take the deterministic query_database fast path; all other
         # questions use the same LLM tool menu as before.
         if isinstance(ev, StartEvent):
+            user_message = ev.get("user_message")
             messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
             messages.extend(ev.get("history") or [])
-            messages.append({"role": "user", "content": ev.get("user_message")})
+            messages.append({"role": "user", "content": user_message})
             trace: list[dict] = []
             iteration = 1
         else:
             messages = ev.messages
             trace = ev.trace
             iteration = ev.iteration
+            user_message = ev.user_message
 
         if iteration > config.AGENT_MAX_TOOL_ITERATIONS:
             return GiveUpEvent(trace=trace, iteration=config.AGENT_MAX_TOOL_ITERATIONS)
 
-        if isinstance(ev, StartEvent) and _is_specific_question_average(ev.get("user_message")):
+        if isinstance(ev, StartEvent) and _is_specific_question_average(user_message):
             tool_call_id = "direct-question-average"
-            arguments = {"question": ev.get("user_message")}
+            arguments = {"question": user_message}
             messages.append({
                 "role": "assistant",
                 "content": "",
@@ -561,6 +575,7 @@ class AgentWorkflow(Workflow):
                 trace=trace,
                 iteration=iteration,
                 batch_size=1,
+                user_message=user_message,
             )
 
         try:
@@ -607,6 +622,7 @@ class AgentWorkflow(Workflow):
                 trace=trace,
                 iteration=iteration,
                 batch_size=len(tool_calls),
+                user_message=user_message,
             ))
         return None
 
@@ -620,7 +636,7 @@ class AgentWorkflow(Workflow):
         # behaviour or verification rules changed - only that it now runs as
         # a workflow step, off the event loop via `asyncio.to_thread`.
         result, verification_outcome = await asyncio.to_thread(
-            _run_tool, ev.tool_name, ev.arguments
+            _run_tool, ev.tool_name, ev.arguments, ev.user_message
         )
         return ToolResultEvent(
             tool_call_id=ev.tool_call_id,
@@ -632,6 +648,7 @@ class AgentWorkflow(Workflow):
             trace=ev.trace,
             iteration=ev.iteration,
             batch_size=ev.batch_size,
+            user_message=ev.user_message,
         )
 
     @step
@@ -676,7 +693,9 @@ class AgentWorkflow(Workflow):
         if any(r.result.get("service_unavailable") for r in batch):
             return GiveUpEvent(trace=trace, iteration=ev.iteration, message=_SERVICE_UNAVAILABLE_MESSAGE)
 
-        return RouteEvent(messages=messages, trace=trace, iteration=ev.iteration + 1)
+        return RouteEvent(
+            messages=messages, trace=trace, iteration=ev.iteration + 1, user_message=ev.user_message
+        )
 
     @step
     async def finalize(

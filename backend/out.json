@@ -1,0 +1,162 @@
+{
+  "answer": "I’m sorry—I can only provide answers based on the employee‑engagement survey data we have, and there isn’t a survey question that specifically asks about “opinion about the HR team’s policies and support.” If you’d like, I can share the closest related ratings (e.g., overall support from colleagues or perceptions of HR‑related themes) that are available in the survey. Let me know how you’d like to proceed.",
+  "gave_up": false,
+  "trace": [
+    {
+      "tool": "run_analytics",
+      "arguments": {
+        "operation": "count_by_group",
+        "params": {
+          "group_by": "Theme"
+        }
+      },
+      "result": {
+        "ok": true,
+        "operation": "count_by_group",
+        "params": {
+          "group_by": "Theme"
+        },
+        "data": [
+          {
+            "Theme": "Learning & Development",
+            "count": 360
+          },
+          {
+            "Theme": "Compensation & Benefits",
+            "count": 351
+          },
+          {
+            "Theme": "Leadership & Trust",
+            "count": 346
+          },
+          {
+            "Theme": "Work Environment",
+            "count": 345
+          },
+          {
+            "Theme": "Communication",
+            "count": 341
+          },
+          {
+            "Theme": "Technology & Tools",
+            "count": 337
+          },
+          {
+            "Theme": "Employee Wellbeing",
+            "count": 333
+          },
+          {
+            "Theme": "Work-Life Balance",
+            "count": 332
+          },
+          {
+            "Theme": "Performance Management",
+            "count": 324
+          },
+          {
+            "Theme": "Workplace Safety",
+            "count": 324
+          },
+          {
+            "Theme": "Career Growth & Mobility",
+            "count": 323
+          },
+          {
+            "Theme": "Job Satisfaction",
+            "count": 323
+          },
+          {
+            "Theme": "Manager Support",
+            "count": 323
+          },
+          {
+            "Theme": "Team Collaboration",
+            "count": 323
+          },
+          {
+            "Theme": "Rewards & Recognition",
+            "count": 315
+          }
+        ],
+        "total_matched": 5000,
+        "error": null,
+        "notes": []
+      },
+      "verification": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "tool": "query_database",
+      "arguments": {
+        "question": "What is the average rating for the survey question about HR team policies and support?"
+      },
+      "result": {
+        "ok": true,
+        "question": "What is the average rating for the survey question about HR team policies and support?",
+        "sql": "SELECT AVG(Rating) AS avg_rating, COUNT(*) AS response_count FROM engagement WHERE Question LIKE '%HR%' AND Question LIKE '%support%';",
+        "attempts": 1,
+        "columns": [
+          "avg_rating",
+          "response_count"
+        ],
+        "rows": [
+          {
+            "avg_rating": null,
+            "response_count": 0
+          }
+        ],
+        "row_count": 1,
+        "truncated": false,
+        "error": null,
+        "notes": [
+          "No survey question is a close enough match to answer this directly (closest real question: 'How much support do you receive from your colleagues when you need help?', similarity 0.69 - likely a related but different topic). Consider asking about that specific question if it's relevant, rather than treating this as a verified answer to the original wording."
+        ],
+        "rating_scale": {
+          "database": "Rating is INTEGER on a 1-5 scale (1 worst, 5 best)",
+          "zero_to_ten_equivalent": "multiply a verified average by 2 only when explicitly requested"
+        }
+      },
+      "verification": {
+        "valid": false,
+        "issues": [
+          "Aggregate column 'avg_rating' is NULL - the query's filter almost certainly matched zero underlying rows (e.g. an exact-match value that isn't a real stored value). Do not report this as a real answer - find the correct filter value (list distinct values if unsure) and retry."
+        ]
+      }
+    },
+    {
+      "tool": "query_database",
+      "arguments": {
+        "question": "List distinct survey questions that mention HR"
+      },
+      "result": {
+        "ok": true,
+        "question": "List distinct survey questions that mention HR",
+        "sql": "SELECT DISTINCT Question FROM engagement WHERE Question LIKE '%HR%';",
+        "attempts": 1,
+        "columns": [
+          "Question"
+        ],
+        "rows": [],
+        "row_count": 0,
+        "truncated": false,
+        "error": null,
+        "notes": [
+          "No survey question is a close enough match to answer this directly (closest real question: 'How much support do you receive from your colleagues when you need help?', similarity 0.69 - likely a related but different topic). Consider asking about that specific question if it's relevant, rather than treating this as a verified answer to the original wording."
+        ],
+        "rating_scale": {
+          "database": "Rating is INTEGER on a 1-5 scale (1 worst, 5 best)",
+          "zero_to_ten_equivalent": "multiply a verified average by 2 only when explicitly requested"
+        }
+      },
+      "verification": {
+        "valid": true,
+        "issues": [
+          "Query returned zero rows - confirm this is expected before answering.",
+          "No survey question is a close enough match to answer this directly (closest real question: 'How much support do you receive from your colleagues when you need help?', similarity 0.69 - likely a related but different topic). Consider asking about that specific question if it's relevant, rather than treating this as a verified answer to the original wording."
+        ]
+      }
+    }
+  ]
+}

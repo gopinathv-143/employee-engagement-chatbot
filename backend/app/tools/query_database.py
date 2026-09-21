@@ -101,7 +101,20 @@ def _substitute_question_filter(sql: str, value: str) -> str | None:
     return new_sql if n else None
 
 
-def query_database(question: str) -> QueryDatabaseResult:
+def query_database(question: str, match_question: str | None = None) -> QueryDatabaseResult:
+    """`question` drives SQL generation, exactly as before. `match_question`
+    is what the closest-real-Question embedding fallback below is scored
+    against - it should be the user's own original wording, not `question`.
+
+    These can diverge: the LLM's tool-call argument for `question` is often
+    an LLM-chosen *sub*-question (e.g. "List distinct Question texts that
+    contain 'HR' in them" as a schema-exploration probe for a user who
+    actually asked "how do you rate the HR team's policies and support?").
+    Running the embedding match against that probe text - as this used to
+    do by reusing `question` for both - finds nothing, silently discarding
+    the one signal that could have surfaced a real, related survey question.
+    Defaults to `question` so existing callers that only ever pass one
+    string keep working unchanged."""
     sql = sql_generator.generate_sql(question)
     result = sql_executor.run_sql(sql)
     attempts = 1
@@ -118,7 +131,7 @@ def query_database(question: str) -> QueryDatabaseResult:
         # actually filtering on Question - otherwise (e.g. a Department
         # filter matched nothing) a "closest Question" suggestion would be
         # irrelevant noise.
-        candidates = schema_index.resolve("Question", question, top_k=1)
+        candidates = schema_index.resolve("Question", match_question or question, top_k=1)
         top = candidates[0] if candidates else None
 
         if top is not None and top.score >= schema_index.DEFAULT_MATCH_THRESHOLD:
