@@ -75,6 +75,18 @@ SYSTEM_PROMPT = """You are an HR analytics assistant for an employee engagement 
 survey dataset. You answer questions ONLY using the tools available to you - you \
 must never invent numbers, percentages, counts, trends, or employee quotes.
 
+Scope check - do this BEFORE choosing a tool: this dataset only covers survey \
+responses (Department, Role, Theme, Question, Rating, Employee_Feedback, free-text \
+Comment, Respondent_Type, Company, Response_Date). If the question is not about this \
+survey data at all - general knowledge, small talk, requests unrelated to workplace/ \
+HR topics, or a question addressed to you personally as if you were an employee \
+("your experience", "your opinion") with no reasonable reading as "what do the \
+survey/comments say" - do NOT call any tool. Answer directly, in one or two \
+sentences: say plainly that you can only answer questions about this employee \
+engagement survey (ratings, departments, themes, comments, sentiment), and invite \
+the user to ask something in that scope. Do not spend tool calls guessing at an \
+interpretation that forces an unrelated question into a tool it doesn't fit.
+
 Tool selection guide:
 - Counts, totals, simple lookups, group-bys, filters -> query_database
 - Percentages, averages, rating distributions, trends over time -> run_analytics \
@@ -143,6 +155,48 @@ _SPECIFIC_QUESTION_AVERAGE_RE = re.compile(
 def _is_specific_question_average(user_message: str) -> bool:
     """Identify averages for one survey question before LLM tool selection."""
     return bool(_SPECIFIC_QUESTION_AVERAGE_RE.search(user_message))
+
+
+_NO_DATA_ISSUE_MARKERS = (
+    "no employee comments were retrieved",
+    "query returned zero rows",
+    "analytics returned no data",
+)
+
+
+def _default_give_up_message(trace: list[dict]) -> str:
+    """Pick a give-up message that matches what actually happened, instead of
+    one generic sentence for every failure. When every attempt in the trace
+    came back with a "found nothing" issue (empty retrieval/rows/analytics -
+    as opposed to a malformed query, an implausible number, or some other
+    real error), the honest and more actionable message is "this doesn't
+    look covered by the data", not "please rephrase" - rephrasing a question
+    about a topic that genuinely isn't in the dataset won't help."""
+    all_issues = [
+        issue
+        for entry in trace
+        for issue in (entry.get("verification", {}).get("issues") or [])
+    ]
+    every_entry_has_issues = trace and all(
+        entry.get("verification", {}).get("issues") for entry in trace
+    )
+    if every_entry_has_issues and all_issues and all(
+        any(marker in issue.lower() for marker in _NO_DATA_ISSUE_MARKERS)
+        for issue in all_issues
+    ):
+        return (
+            "I couldn't find anything in the survey data covering that - no matching "
+            "comments, rows, or metrics. This assistant only answers from what's "
+            "actually in the survey (departments, roles, themes like compensation or "
+            "management, ratings, and free-text comments), so this topic may simply "
+            "not be represented in it. Try a different topic, or a specific "
+            "department/theme/time period."
+        )
+    return (
+        "I wasn't able to produce a fully verified answer to that question "
+        "after several attempts. Could you rephrase it, or narrow it down "
+        "(e.g. a specific department, theme, or time period)?"
+    )
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -632,11 +686,7 @@ class AgentWorkflow(Workflow):
         # ChatResult shape the FastAPI /chat endpoint has always expected.
         if isinstance(ev, GiveUpEvent):
             result = ChatResult(
-                answer=ev.message or (
-                    "I wasn't able to produce a fully verified answer to that question "
-                    "after several attempts. Could you rephrase it, or narrow it down "
-                    "(e.g. a specific department, theme, or time period)?"
-                ),
+                answer=ev.message or _default_give_up_message(ev.trace),
                 tool_trace=ev.trace,
                 iterations_used=ev.iteration,
                 gave_up=True,

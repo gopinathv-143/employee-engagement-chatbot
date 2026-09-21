@@ -9,11 +9,24 @@ each) into something a non-technical reader can scan in a few seconds,
 instead of a JSON blob.
 """
 
+import time
+
 import pandas as pd
 import requests
 import streamlit as st
 
 BACKEND_URL = "http://127.0.0.1:8000"
+
+# A multi-tool question (retrieval + sentiment, say) makes several sequential
+# Groq calls, each with its own rate-limit retry/backoff - under sustained
+# rate limiting that can legitimately take minutes even though it eventually
+# succeeds. Rather than one blocking POST /chat with a single fixed timeout
+# (which either cuts off slow-but-succeeding turns or waits too long on a
+# truly hung one), the backend runs the turn as a job (POST /chat/jobs) and
+# this polls its status (GET /chat/jobs/{id}) with short, cheap requests -
+# so it can wait much longer overall without needing a long-lived connection.
+CHAT_JOB_POLL_INTERVAL_SECONDS = 1.5
+CHAT_JOB_MAX_WAIT_SECONDS = 600
 
 st.set_page_config(
     page_title="Employee Engagement Chatbot",
@@ -437,56 +450,107 @@ def ask(question: str) -> None:
     ]
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing employee engagement data..."):
-            try:
-                response = requests.post(
-                    f"{BACKEND_URL}/chat",
-                    json={"message": question, "history": history},
-                    timeout=120,
-                )
-            except requests.exceptions.Timeout:
-                st.error("The request took too long. Please try again.")
-                return
-            except requests.exceptions.ConnectionError:
-                st.error(
-                    "Could not connect to the backend. Make sure the FastAPI "
-                    "server is running on port 8000."
-                )
-                return
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Unexpected error: {exc}")
-                return
+        status = st.empty()
+        status.markdown("_Starting..._")
 
-            if response.status_code != 200:
-                st.error(f"Backend error: {response.status_code}")
-                st.code(response.text)
-                return
-
-            result = response.json()
-            answer = result.get("answer", "No answer was returned.")
-            tool_trace = result.get("tool_trace", [])
-            gave_up = result.get("gave_up", False)
-
-            st.markdown(answer)
-            if gave_up:
-                st.warning(
-                    "This response is incomplete - see the message above for why, "
-                    "and what to do next.",
-                    icon="⚠️",
-                )
-            if tool_trace:
-                render_headline(tool_trace, gave_up=gave_up)
-                with st.expander("🔍 How this answer was put together"):
-                    render_tool_trace(tool_trace)
-
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": answer,
-                    "tool_trace": tool_trace,
-                    "gave_up": gave_up,
-                }
+        try:
+            create_response = requests.post(
+                f"{BACKEND_URL}/chat/jobs",
+                json={"message": question, "history": history},
+                timeout=15,
             )
+        except requests.exceptions.ConnectionError:
+            status.empty()
+            st.error(
+                "Could not connect to the backend. Make sure the FastAPI "
+                "server is running on port 8000."
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            status.empty()
+            st.error(f"Unexpected error starting the request: {exc}")
+            return
+
+        if create_response.status_code != 200:
+            status.empty()
+            st.error(f"Backend error: {create_response.status_code}")
+            st.code(create_response.text)
+            return
+
+        job_id = create_response.json()["job_id"]
+
+        # Poll with short, cheap requests instead of one long blocking call -
+        # a slow-but-succeeding turn (heavy rate-limit backoff on the
+        # backend) is indistinguishable from a hung one to a single fixed
+        # timeout, so it either cuts off good answers or waits forever on
+        # bad ones. Polling lets this wait much longer in total while each
+        # individual request stays fast, and shows real elapsed time instead
+        # of a static spinner.
+        started_at = time.time()
+        job_result = None
+        job_error = None
+        while True:
+            elapsed = time.time() - started_at
+            if elapsed > CHAT_JOB_MAX_WAIT_SECONDS:
+                job_error = (
+                    f"Still no answer after {int(CHAT_JOB_MAX_WAIT_SECONDS)}s - the "
+                    "backend may be stuck or heavily rate-limited. It may still "
+                    "finish in the background; try asking again in a bit."
+                )
+                break
+
+            status.markdown(f"⏳ Analyzing employee engagement data... ({int(elapsed)}s)")
+
+            try:
+                poll_response = requests.get(f"{BACKEND_URL}/chat/jobs/{job_id}", timeout=10)
+            except requests.exceptions.RequestException:
+                time.sleep(CHAT_JOB_POLL_INTERVAL_SECONDS)
+                continue
+
+            if poll_response.status_code != 200:
+                time.sleep(CHAT_JOB_POLL_INTERVAL_SECONDS)
+                continue
+
+            payload = poll_response.json()
+            if payload["status"] == "done":
+                job_result = payload["result"]
+                break
+            if payload["status"] == "error":
+                job_error = payload.get("error") or "The backend failed to produce an answer."
+                break
+
+            time.sleep(CHAT_JOB_POLL_INTERVAL_SECONDS)
+
+        status.empty()
+
+        if job_error is not None:
+            st.error(job_error)
+            return
+
+        answer = job_result.get("answer", "No answer was returned.")
+        tool_trace = job_result.get("tool_trace", [])
+        gave_up = job_result.get("gave_up", False)
+
+        st.markdown(answer)
+        if gave_up:
+            st.warning(
+                "This response is incomplete - see the message above for why, "
+                "and what to do next.",
+                icon="⚠️",
+            )
+        if tool_trace:
+            render_headline(tool_trace, gave_up=gave_up)
+            with st.expander("🔍 How this answer was put together"):
+                render_tool_trace(tool_trace)
+
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "tool_trace": tool_trace,
+                "gave_up": gave_up,
+            }
+        )
 
 
 user_question = st.chat_input("Ask about employee engagement...")
