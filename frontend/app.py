@@ -29,6 +29,19 @@ BACKEND_URL = "http://127.0.0.1:8000"
 CHAT_JOB_POLL_INTERVAL_SECONDS = 1.5
 CHAT_JOB_MAX_WAIT_SECONDS = 600
 
+# Rotated underneath the elapsed-time counter while a job is running, so a
+# slow (but healthy) answer reads as active progress rather than a stuck
+# spinner - purely cosmetic, cycled by elapsed time, not tied to real stages.
+THINKING_PHRASES = [
+    "Reading through survey responses",
+    "Crunching the numbers",
+    "Cross-checking the data",
+    "Verifying the result",
+]
+
+USER_AVATAR = "🧑‍💼"
+ASSISTANT_AVATAR = "✨"
+
 st.set_page_config(
     page_title="Employee Engagement Chatbot",
     page_icon="💬",
@@ -38,58 +51,266 @@ st.set_page_config(
 # -----------------------------
 # Styling
 #
-# Scoped to elements this file adds (header banner, badges, tool cards) -
-# deliberately does not touch Streamlit's own chrome (.stApp background,
-# sidebar, chat bubbles), so it looks right in both light and dark theme.
+# Scoped to elements this file adds (header banner, chat bubbles, sidebar,
+# metric cards) plus a light re-skin of Streamlit's own chrome via its
+# stable data-testid hooks - kept to colors/spacing/typography so it holds
+# up in both light and dark theme.
 # -----------------------------
 
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class^="st-"], [class*=" st-"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    /* Streamlit's own icon glyphs (collapse arrow, expander chevron, etc.)
+       are ligature text in an icon font - the rule above was overriding
+       that font and leaving the literal ligature name ("keyboard_double_
+       arrow_left") visible instead of the icon. */
+    [data-testid="stIconMaterial"] {
+        font-family: 'Material Symbols Rounded' !important;
+    }
+
+    :root {
+        --brand-1: #4f46e5;
+        --brand-2: #7c3aed;
+        --brand-soft: rgba(124, 58, 237, 0.08);
+        --brand-border: rgba(124, 58, 237, 0.18);
+    }
+
+    /* App background - plain white */
+    .stApp, [data-testid="stAppViewContainer"] {
+        background: #ffffff;
+    }
+    [data-testid="stBottom"] > div { background: #ffffff; }
+    [data-testid="stHeader"], [data-testid="stToolbar"] {
+        background: #ffffff !important;
+    }
+
+    /* Clean up Streamlit's own chrome for a demo-ready look */
+    [data-testid="stAppDeployButton"] { display: none !important; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    [data-testid="stDecoration"] { display: none; }
+    /* Streamlit adds a hover "link to heading" icon to every h1-h6 (incl.
+       raw HTML ones in st.markdown) - not useful outside a docs page. */
+    [data-testid="stHeaderActionElements"] { display: none; }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.35); border-radius: 8px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(124, 58, 237, 0.55); }
+
+    /* ---------- Header banner ---------- */
     .app-header {
-        padding: 1.35rem 1.75rem;
-        border-radius: 16px;
-        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+        position: relative;
+        overflow: hidden;
+        padding: 1.6rem 1.9rem;
+        border-radius: 18px;
+        background: linear-gradient(135deg, var(--brand-1) 0%, var(--brand-2) 100%);
         color: #ffffff;
-        margin-bottom: 1.1rem;
+        margin-bottom: 1.3rem;
+        box-shadow: 0 10px 30px -12px rgba(79, 70, 229, 0.55);
     }
-    .app-header h1 { margin: 0; font-size: 1.55rem; }
-    .app-header p { margin: 0.35rem 0 0; opacity: 0.92; font-size: 0.92rem; }
-
-    .badge {
-        display: inline-block;
-        padding: 0.15rem 0.65rem;
-        border-radius: 999px;
-        font-size: 0.76rem;
-        font-weight: 600;
-        white-space: nowrap;
+    .app-header::after {
+        content: "";
+        position: absolute;
+        top: -60px;
+        right: -60px;
+        width: 220px;
+        height: 220px;
+        background: radial-gradient(circle, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0) 70%);
+        border-radius: 50%;
     }
-    .badge-ok   { background: #dcfce7; color: #166534; }
-    .badge-warn { background: #fef9c3; color: #854d0e; }
-    .badge-fail { background: #fee2e2; color: #991b1b; }
-
-    .tool-card {
-        border: 1px solid rgba(128, 128, 128, 0.25);
-        border-radius: 12px;
-        padding: 0.9rem 1.1rem;
-        margin-bottom: 0.7rem;
+    .app-header h1 {
+        margin: 0;
+        font-size: 1.65rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
     }
-    .tool-card-title {
-        font-weight: 600;
+    .app-header p {
+        margin: 0.4rem 0 0;
+        opacity: 0.94;
         font-size: 0.95rem;
+        max-width: 640px;
+        line-height: 1.45;
+    }
+
+    /* ---------- Sidebar ---------- */
+    [data-testid="stSidebar"] {
+        background: #f5f4fb;
+        border-right: 1px solid var(--brand-border);
+    }
+    [data-testid="stSidebar"] h3 {
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--brand-2);
+        margin-top: 0.2rem;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button {
+        border-radius: 10px;
+        border: 1px solid var(--brand-border);
+        background: #ffffff;
+        text-align: left;
+        justify-content: flex-start;
+        font-size: 0.86rem;
+        padding: 0.5rem 0.8rem;
+        transition: all 0.15s ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stButton"] button:hover {
+        border-color: var(--brand-2);
+        background: var(--brand-soft);
+        color: var(--brand-2);
+        transform: translateX(2px);
+    }
+    .sidebar-brand {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
         margin-bottom: 0.4rem;
     }
-    .comment-card {
-        border-left: 3px solid #7c3aed;
-        padding: 0.4rem 0.8rem;
-        margin-bottom: 0.5rem;
-        border-radius: 0 8px 8px 0;
-        background: rgba(124, 58, 237, 0.06);
+    .sidebar-brand .icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.15rem;
+        background: linear-gradient(135deg, var(--brand-1), var(--brand-2));
     }
-    .comment-meta {
-        font-size: 0.78rem;
-        opacity: 0.75;
-        margin-bottom: 0.15rem;
+    .sidebar-brand .title {
+        font-weight: 700;
+        font-size: 1.0rem;
+        color: #1f2937;
+        line-height: 1.1;
+    }
+    .sidebar-brand .subtitle {
+        font-size: 0.72rem;
+        color: #6b7280;
+    }
+    .history-item {
+        display: flex;
+        gap: 0.55rem;
+        padding: 0.4rem 0.1rem;
+        font-size: 0.82rem;
+        color: #3f3f46;
+        line-height: 1.35;
+    }
+    .history-item .bullet {
+        flex-shrink: 0;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--brand-soft);
+        color: var(--brand-2);
+        font-size: 0.68rem;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-top: 0.1rem;
+    }
+    .history-empty {
+        font-size: 0.82rem;
+        color: #9ca3af;
+        font-style: italic;
+    }
+
+    /* ---------- Chat bubbles ---------- */
+    [data-testid="stChatMessage"] {
+        border-radius: 16px;
+        padding: 0.85rem 1.05rem;
+        margin-bottom: 0.7rem;
+        border: 1px solid rgba(0,0,0,0.05);
+        animation: fadeIn 0.25s ease;
+    }
+    [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+        background: var(--brand-soft);
+        border-color: var(--brand-border);
+    }
+    [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+        background: #ffffff;
+        box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+    }
+    [data-testid="stChatMessageAvatarUser"] {
+        background: linear-gradient(135deg, var(--brand-1), var(--brand-2)) !important;
+    }
+    [data-testid="stChatMessageAvatarAssistant"] {
+        background: linear-gradient(135deg, #f59e0b, #ea580c) !important;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ---------- Chat input ---------- */
+    [data-testid="stChatInput"] {
+        border-radius: 14px;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08);
+    }
+
+    /* ---------- Headline metric cards ---------- */
+    [data-testid="stMetric"] {
+        background: var(--brand-soft);
+        border-left: 4px solid var(--brand-2);
+        border-radius: 10px;
+        padding: 0.7rem 0.9rem 0.5rem;
+    }
+    [data-testid="stMetricValue"] { color: var(--brand-2); font-weight: 700; }
+
+    /* ---------- Alerts ---------- */
+    [data-testid="stAlert"] { border-radius: 12px; }
+
+    /* ---------- Empty state ---------- */
+    .empty-state {
+        text-align: center;
+        padding: 2.6rem 1.5rem 1.8rem;
+        color: #4b5563;
+    }
+    .empty-state .icon {
+        font-size: 2.4rem;
+        margin-bottom: 0.6rem;
+    }
+    .empty-state-title {
+        margin: 0 0 0.35rem;
+        color: #1f2937;
+        font-size: 1.15rem;
+        font-weight: 700;
+    }
+    .empty-state p {
+        margin: 0 auto 1.1rem;
+        max-width: 420px;
+        font-size: 0.9rem;
+        color: #6b7280;
+    }
+
+    /* ---------- Thinking indicator ---------- */
+    .thinking {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #4b5563;
+        font-size: 0.92rem;
+    }
+    .thinking .dots span {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin-right: 3px;
+        border-radius: 50%;
+        background: var(--brand-2);
+        animation: bounce 1.1s infinite ease-in-out both;
+    }
+    .thinking .dots span:nth-child(1) { animation-delay: -0.24s; }
+    .thinking .dots span:nth-child(2) { animation-delay: -0.12s; }
+    @keyframes bounce {
+        0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+        40% { transform: scale(1); opacity: 1; }
     }
     </style>
     """,
@@ -162,26 +383,31 @@ def get_example_questions() -> list[str]:
 EXAMPLE_QUESTIONS = get_example_questions()
 
 with st.sidebar:
-    st.subheader("System status")
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+            <div class="icon">💬</div>
+            <div>
+                <div class="title">Engagement Assistant</div>
+                <div class="subtitle">Survey insights, on demand</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    try:
-        health_response = requests.get(f"{BACKEND_URL}/health", timeout=5)
-        health = health_response.json() if health_response.status_code == 200 else None
-    except requests.exceptions.RequestException:
-        health = None
+    st.divider()
+    st.subheader("Question history")
 
-    if health is None:
-        st.error("Backend offline")
-    else:
-        st.success("Backend online")
-        cols = st.columns(2)
-        cols[0].metric("Survey responses", health.get("response_count") or "—")
-        cols[1].metric(
-            "Search index",
-            "Ready" if health.get("index_exists") else "Missing",
+    asked_questions = [m["content"] for m in st.session_state.messages if m["role"] == "user"]
+    if asked_questions:
+        history_html = "".join(
+            f'<div class="history-item"><div class="bullet">{i}</div><div>{q}</div></div>'
+            for i, q in enumerate(asked_questions, start=1)
         )
-        st.caption(f"Chat model: `{health.get('chat_model', 'unknown')}`")
-        st.caption(f"Embedding model: `{health.get('embed_model', 'unknown')}`")
+        st.markdown(history_html, unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="history-empty">No questions asked yet.</div>', unsafe_allow_html=True)
 
     st.divider()
 
@@ -195,163 +421,6 @@ with st.sidebar:
         if st.button(q, key=f"example::{q}", width="stretch"):
             st.session_state.pending_question = q
 
-# -----------------------------
-# Tool-trace rendering
-#
-# One block per tool the agent called, showing exactly what it did and
-# whether the deterministic verification step approved the result - not a
-# JSON dump of the raw API response.
-# -----------------------------
-
-TOOL_ICONS = {
-    "query_database": "🗄️",
-    "run_analytics": "📊",
-    "search_employee_comments": "🔎",
-    "analyze_sentiment": "🙂",
-}
-TOOL_LABELS = {
-    "query_database": "Database query",
-    "run_analytics": "Analytics",
-    "search_employee_comments": "Comment search",
-    "analyze_sentiment": "Sentiment analysis",
-}
-SENTIMENT_DOT = {"Positive": "🟢", "Neutral": "⚪", "Negative": "🔴"}
-
-
-def verification_badge(verification: dict) -> str:
-    valid = verification.get("valid", True)
-    has_issues = bool(verification.get("issues"))
-    if valid and not has_issues:
-        return '<span class="badge badge-ok">✅ Verified</span>'
-    if valid and has_issues:
-        return '<span class="badge badge-warn">🟡 Verified · note below</span>'
-    return '<span class="badge badge-fail">🔴 Failed verification</span>'
-
-
-def render_query_database(entry: dict) -> None:
-    result = entry["result"]
-    sql = result.get("sql")
-    if sql:
-        st.code(sql, language="sql")
-    rows = result.get("rows") or []
-    if rows:
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    elif result.get("ok"):
-        st.caption("Query ran successfully but returned no rows.")
-    if result.get("error"):
-        st.error(result["error"])
-    for note in result.get("notes") or []:
-        st.info(note, icon="🧭")
-
-
-def render_run_analytics(entry: dict) -> None:
-    result = entry["result"]
-    op = result.get("operation", "")
-    data = result.get("data") or []
-    st.caption(f"Operation: `{op}`")
-
-    if not data:
-        st.caption("No matching data for this filter.")
-    else:
-        df = pd.DataFrame(data)
-        st.dataframe(df, width="stretch", hide_index=True)
-        try:
-            if op == "percentage" and "percentage" in df.columns:
-                st.metric("Percentage", f"{data[0]['percentage']}%")
-            elif op == "average_by_group" and "avg_rating" in df.columns:
-                label_col = next(c for c in df.columns if c not in ("avg_rating", "count"))
-                st.bar_chart(df.set_index(label_col)["avg_rating"])
-            elif op == "count_by_group" and "count" in df.columns:
-                label_col = next(c for c in df.columns if c != "count")
-                st.bar_chart(df.set_index(label_col)["count"])
-            elif op == "rating_distribution" and "rating" in df.columns:
-                st.bar_chart(df.set_index("rating")["count"])
-            elif op == "trend" and "month" in df.columns:
-                y_col = "avg_rating" if "avg_rating" in df.columns else "count"
-                st.line_chart(df.set_index("month")[y_col])
-        except (StopIteration, KeyError):
-            pass  # chart is a nice-to-have; the table above already has the numbers
-
-    for note in result.get("notes") or []:
-        st.info(note, icon="🧭")
-
-
-def render_search_employee_comments(entry: dict) -> None:
-    result = entry["result"]
-    for note in result.get("notes") or []:
-        st.info(note, icon="🧭")
-
-    results = result.get("results") or []
-    if not results:
-        st.caption("No matching comments found.")
-        return
-
-    for r in results:
-        score = r.get("score")
-        score_txt = f" · match {score:.2f}" if isinstance(score, (int, float)) else ""
-        st.markdown(
-            f"""
-            <div class="comment-card">
-                <div class="comment-meta">
-                    {r.get('department', '')} · {r.get('role', '')} ·
-                    rating {r.get('rating', '?')}/5 ·
-                    {r.get('employee_feedback', '')}{score_txt}
-                </div>
-                <div>“{r.get('text', '')}”</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def render_analyze_sentiment(entry: dict) -> None:
-    result = entry["result"]
-    items = result.get("results") or []
-    if not items:
-        st.caption("No sentiment results.")
-        return
-
-    counts = pd.Series([i["sentiment"] for i in items]).value_counts()
-    st.bar_chart(counts)
-
-    shown = items[:6]
-    for i in shown:
-        dot = SENTIMENT_DOT.get(i.get("sentiment"), "⚪")
-        st.markdown(f"{dot} **{i.get('sentiment')}** — {i.get('rationale', '')}")
-    if len(items) > len(shown):
-        st.caption(f"… and {len(items) - len(shown)} more comments classified.")
-
-
-RENDERERS = {
-    "query_database": render_query_database,
-    "run_analytics": render_run_analytics,
-    "search_employee_comments": render_search_employee_comments,
-    "analyze_sentiment": render_analyze_sentiment,
-}
-
-
-def render_tool_trace(tool_trace: list) -> None:
-    for i, entry in enumerate(tool_trace, start=1):
-        tool = entry.get("tool", "")
-        icon = TOOL_ICONS.get(tool, "🔧")
-        label = TOOL_LABELS.get(tool, tool)
-        badge = verification_badge(entry.get("verification", {}))
-
-        st.markdown(
-            f'<div class="tool-card-title">{i}. {icon} {label} &nbsp; {badge}</div>',
-            unsafe_allow_html=True,
-        )
-
-        renderer = RENDERERS.get(tool)
-        if renderer:
-            renderer(entry)
-
-        for issue in entry.get("verification", {}).get("issues") or []:
-            st.caption(f"⚠️ {issue}")
-
-        if i < len(tool_trace):
-            st.divider()
-
 
 def _is_plain_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -359,10 +428,8 @@ def _is_plain_number(value) -> bool:
 
 def render_headline(tool_trace: list, gave_up: bool = False) -> None:
     """Surface the single most decision-relevant number/chart from this
-    turn immediately below the answer, with no click required - the
-    verification badges and full SQL/tables stay in the "How this answer
-    was put together" expander for anyone who wants to audit them, but an
-    HR reader scanning many answers needs the number-in-context up front.
+    turn immediately below the answer, with no click required - an HR
+    reader scanning many answers needs the number-in-context up front.
 
     Two correctness rules, not just a nice-to-have:
     - If the agent gave up, show nothing here. tool_trace can still contain
@@ -445,11 +512,25 @@ def render_headline(tool_trace: list, gave_up: bool = False) -> None:
 
 
 # -----------------------------
-# Conversation history
+# Conversation history / empty state
 # -----------------------------
 
+if not st.session_state.messages:
+    st.markdown(
+        """
+        <div class="empty-state">
+            <div class="icon">💬</div>
+            <div class="empty-state-title">What would you like to know?</div>
+            <p>Ask a question below, or pick one from the sidebar, to get a
+            verified answer straight from the survey data.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
+    avatar = USER_AVATAR if message["role"] == "user" else ASSISTANT_AVATAR
+    with st.chat_message(message["role"], avatar=avatar):
         st.markdown(message["content"])
         if message.get("gave_up"):
             st.warning(
@@ -459,8 +540,6 @@ for message in st.session_state.messages:
             )
         if message.get("tool_trace"):
             render_headline(message["tool_trace"], gave_up=message.get("gave_up", False))
-            with st.expander("🔍 How this answer was put together"):
-                render_tool_trace(message["tool_trace"])
 
 
 # -----------------------------
@@ -470,7 +549,7 @@ for message in st.session_state.messages:
 
 def ask(question: str) -> None:
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=USER_AVATAR):
         st.markdown(question)
 
     history = [
@@ -478,9 +557,13 @@ def ask(question: str) -> None:
         for m in st.session_state.messages[:-1]
     ]
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
         status = st.empty()
-        status.markdown("_Starting..._")
+        status.markdown(
+            '<div class="thinking">Starting'
+            '<span class="dots"><span></span><span></span><span></span></span></div>',
+            unsafe_allow_html=True,
+        )
 
         try:
             create_response = requests.post(
@@ -528,7 +611,12 @@ def ask(question: str) -> None:
                 )
                 break
 
-            status.markdown(f"⏳ Analyzing employee engagement data... ({int(elapsed)}s)")
+            phrase = THINKING_PHRASES[int(elapsed // 4) % len(THINKING_PHRASES)]
+            status.markdown(
+                f'<div class="thinking">{phrase} · {int(elapsed)}s'
+                '<span class="dots"><span></span><span></span><span></span></span></div>',
+                unsafe_allow_html=True,
+            )
 
             try:
                 poll_response = requests.get(f"{BACKEND_URL}/chat/jobs/{job_id}", timeout=10)
@@ -569,8 +657,6 @@ def ask(question: str) -> None:
             )
         if tool_trace:
             render_headline(tool_trace, gave_up=gave_up)
-            with st.expander("🔍 How this answer was put together"):
-                render_tool_trace(tool_trace)
 
         st.session_state.messages.append(
             {
